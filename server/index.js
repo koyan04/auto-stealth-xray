@@ -98,20 +98,10 @@ function isPublicIp(ip) {
 }
 
 function extractOriginIp(line) {
-  const patterns = [
-    /\bfrom\s+(?:\[(?<ipv6>[A-Fa-f0-9:]+)\]|(?<ipv4>\d{1,3}(?:\.\d{1,3}){3})|(?<host>[^\s:]+))(?:[:\s]|$)/,
-    /\bsrc(?:addr|ip)?\s*[:=]\s*(?:\[(?<ipv6>[A-Fa-f0-9:]+)\]|(?<ipv4>\d{1,3}(?:\.\d{1,3}){3})|(?<host>[^\s:]+))(?:[:\s]|$)/i,
-    /\bclient\s*[:=]\s*(?:\[(?<ipv6>[A-Fa-f0-9:]+)\]|(?<ipv4>\d{1,3}(?:\.\d{1,3}){3})|(?<host>[^\s:]+))(?:[:\s]|$)/i,
-    /\bremote\s*[:=]\s*(?:\[(?<ipv6>[A-Fa-f0-9:]+)\]|(?<ipv4>\d{1,3}(?:\.\d{1,3}){3})|(?<host>[^\s:]+))(?:[:\s]|$)/i
-  ];
-
-  for (const pattern of patterns) {
-    const match = line.match(pattern);
-    const ip = match?.groups?.ipv4 || match?.groups?.ipv6 || match?.groups?.host || "";
-    if (isPublicIp(ip)) return ip;
-  }
-
-  return "";
+  const ipMatches = line.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g) || [];
+  const publicIp = ipMatches.find(isPublicIp);
+  if (publicIp) return publicIp;
+  return ipMatches.find((ip) => /^127\./.test(ip)) || "";
 }
 
 function extractStatEntries(stdout) {
