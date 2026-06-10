@@ -30,10 +30,14 @@ function requireAuth(req, res, next) {
 
 async function readJson(file, fallback) {
   try {
-    return JSON.parse(await fs.readFile(file, "utf8"));
+    const content = await fs.readFile(file, "utf8");
+    if (!content.trim()) return fallback; // Handle empty file
+    return JSON.parse(content);
   } catch (error) {
     if (error.code === "ENOENT") return fallback;
-    throw error;
+    // Log the parsing error for debugging
+    console.error(`Error parsing JSON file ${file}:`, error.message);
+    return fallback; // Return fallback for corrupted JSON
   }
 }
 
@@ -101,10 +105,21 @@ function isPublicIp(ip) {
 }
 
 function extractOriginIp(line) {
-  const ipMatches = line.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g) || [];
-  const publicIp = ipMatches.find(isPublicIp);
-  if (publicIp) return publicIp;
-  return ipMatches.find((ip) => /^127\./.test(ip)) || "";
+  const xRealIpMatch = line.match(/X-Real-IP: (\b(?:\d{1,3}\.){3}\d{1,3}\b)/);
+  if (xRealIpMatch && isPublicIp(xRealIpMatch[1])) return xRealIpMatch[1];
+
+  const xForwardedForMatch = line.match(/X-Forwarded-For: ([\d., ]+)/);
+  if (xForwardedForMatch) {
+    const ips = xForwardedForMatch[1].split(",").map((s) => s.trim());
+    for (const ip of ips) {
+      if (isPublicIp(ip)) return ip;
+    }
+  }
+
+  const firstIpMatch = line.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/);
+  if (firstIpMatch && isPublicIp(firstIpMatch[0])) return firstIpMatch[0];
+
+  return "";
 }
 
 function extractStatEntries(stdout) {
