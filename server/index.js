@@ -38,10 +38,12 @@ async function readJson(file, fallback) {
 }
 
 async function writeJson(file, data) {
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  const temp = `${file}.${process.pid}.tmp`;
-  await fs.writeFile(temp, `${JSON.stringify(data, null, 2)}\n`);
-  await fs.rename(temp, file);
+  try {
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, `${JSON.stringify(data, null, 2)}\n`);
+  } catch {
+    // write failure should not crash the panel
+  }
 }
 
 async function readDb() {
