@@ -23,11 +23,19 @@ Clone the repository from GitHub, then run the installer from the project root:
 
 ```bash
 git clone https://github.com/koyan04/auto-stealth-xray.git
-cd xray-server-manager
+cd auto-stealth-xray
 sudo bash scripts/install.sh vpn.yourdomain.com
 ```
 
-If you already have the repository checked out locally, the same installer command works from that folder.
+If the target folder already exists on the server, update it instead of cloning again:
+
+```bash
+cd ~/auto-stealth-xray
+git pull
+sudo bash scripts/install.sh xray.vchannel.dpdns.org
+```
+
+If you already have a local checkout, the same installer command works from that folder.
 
 ## Installer script
 

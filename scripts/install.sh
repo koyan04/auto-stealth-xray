@@ -19,8 +19,8 @@ fi
 APP_DIR="${APP_DIR:-/opt/xray-server-manager}"
 PANEL_PORT="${PANEL_PORT:-2053}"
 WS_PATH="${WS_PATH:-/assets}"
-PANEL_TOKEN="${PANEL_TOKEN:-$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)}"
-FIRST_UUID="$(cat /proc/sys/kernel/random/uuid)"
+PANEL_TOKEN="${PANEL_TOKEN:-$(tr -d '-' </proc/sys/kernel/random/uuid)}"
+FIRST_UUID="$(tr -d '-' </proc/sys/kernel/random/uuid)"
 
 echo "[1] Install base packages"
 apt update -y
