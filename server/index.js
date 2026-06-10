@@ -71,6 +71,7 @@ function normalizeUser(input, existing = {}) {
     note: String(input.note ?? existing.note ?? ""),
     usageOffsetBytes: Number(existing.usageOffsetBytes || 0),
     lastRuntimeBytes: Number(existing.lastRuntimeBytes || 0),
+    lastTrafficSeenAt: existing.lastTrafficSeenAt || "",
     usedBytes: Number(existing.usedBytes || 0),
     createdAt: existing.createdAt || now,
     updatedAt: now
@@ -304,6 +305,11 @@ async function getUsage(users) {
     user.lastRuntimeBytes = runtimeTotal;
     user.usedBytes = Number(user.usageOffsetBytes || 0) + runtimeTotal;
     usage[user.id].total = user.usedBytes;
+
+    // Mark last traffic timestamp when user has non-zero runtime traffic
+    if (usage[user.id].uplink > 0 || usage[user.id].downlink > 0) {
+      user.lastTrafficSeenAt = new Date().toISOString();
+    }
   }
 
   return usage;
@@ -319,7 +325,9 @@ async function serializeUsers() {
     const live = activity[user.id] || { allIps: new Set(), recentIps: new Set(), lastSeenAt: "" };
     const overData = user.dataLimitGb > 0 && used.total >= gbToBytes(user.dataLimitGb);
     const overIp = user.ipLimit > 0 && live.recentIps.size > user.ipLimit;
-    const online = user.enabled && !isExpired(user) && !overData && !overIp && live.recentIps.size > 0;
+    const trafficAge = user.lastTrafficSeenAt ? Date.now() - Date.parse(user.lastTrafficSeenAt) : Infinity;
+    const online = user.enabled && !isExpired(user) && !overData && !overIp && trafficAge <= ONLINE_WINDOW_MS;
+    const lastSeenForUi = live.lastSeenAt || user.lastTrafficSeenAt || "";
 
     return {
       ...user,
@@ -329,10 +337,10 @@ async function serializeUsers() {
       overData,
       overIp,
       online,
-      onlineDevices: live.recentIps.size,
-      connectedIps: Array.from(live.recentIps).sort(),
-      knownIps: Array.from(live.allIps).sort(),
-      lastSeenAt: live.lastSeenAt,
+      onlineDevices: user.online ? (live.recentIps.size > 0 ? live.recentIps.size : 1) : 0,
+      connectedIps: live.recentIps.size > 0 ? Array.from(live.recentIps).sort() : [],
+      knownIps: live.allIps.size > 0 ? Array.from(live.allIps).sort() : [],
+      lastSeenAt: lastSeenForUi,
       usedBytes: used.total,
       activeInXray: user.enabled && !isExpired(user) && !overData && !overIp
     };
