@@ -361,7 +361,7 @@ function buildVlessLink(user) {
   return `vless://${user.uuid}@${DOMAIN}:443?${params.toString()}#${encodeURIComponent(user.name)}`;
 }
 
-async function syncXray(db) {
+async function syncXray(db, forceRestart = false) {
   const usage = await getUsage(db.users);
   const activity = await readAccessLogSummary(db.users);
   const activeUsers = db.users.filter((user) => {
@@ -373,13 +373,23 @@ async function syncXray(db) {
   });
 
   const config = ensureManagedConfig(await readXrayConfig(), activeUsers);
-  try {
-    await fs.copyFile(XRAY_CONFIG_PATH, `${XRAY_CONFIG_PATH}.bak`);
-  } catch {
-    // First install may not have an existing config yet.
+
+  // Only write config and restart when the client list actually changed
+  const existing = await readJson(XRAY_CONFIG_PATH, null);
+  const existingEmails = existing?.inbounds?.[0]?.settings?.clients?.map((c) => c.email)?.sort()?.join(",") || "";
+  const newEmails = config.inbounds?.[0]?.settings?.clients?.map((c) => c.email)?.sort()?.join(",") || "";
+
+  if (forceRestart || existingEmails !== newEmails) {
+    try {
+      await fs.copyFile(XRAY_CONFIG_PATH, `${XRAY_CONFIG_PATH}.bak`);
+    } catch {
+      // First install may not have an existing config yet.
+    }
+    await writeJson(XRAY_CONFIG_PATH, config);
+    return restartXray();
   }
-  await writeJson(XRAY_CONFIG_PATH, config);
-  return restartXray();
+
+  return { ok: true, skipped: true };
 }
 
 app.get("/api/session", requireAuth, async (_req, res) => {
@@ -395,7 +405,7 @@ app.post("/api/users", requireAuth, async (req, res) => {
   const user = normalizeUser(req.body || {});
   db.users.push(user);
   db.events.unshift({ at: new Date().toISOString(), message: `Created ${user.name}` });
-  const restart = await syncXray(db);
+  const restart = await syncXray(db, true);
   await saveDb(db);
   res.status(201).json({ user: (await serializeUsers()).find((item) => item.id === user.id), restart });
 });
@@ -406,7 +416,7 @@ app.put("/api/users/:id", requireAuth, async (req, res) => {
   if (index === -1) return res.status(404).json({ error: "User not found" });
   db.users[index] = normalizeUser(req.body || {}, db.users[index]);
   db.events.unshift({ at: new Date().toISOString(), message: `Updated ${db.users[index].name}` });
-  const restart = await syncXray(db);
+  const restart = await syncXray(db, true);
   await saveDb(db);
   res.json({ user: (await serializeUsers()).find((item) => item.id === req.params.id), restart });
 });
@@ -416,14 +426,14 @@ app.delete("/api/users/:id", requireAuth, async (req, res) => {
   const user = db.users.find((item) => item.id === req.params.id);
   db.users = db.users.filter((item) => item.id !== req.params.id);
   db.events.unshift({ at: new Date().toISOString(), message: `Deleted ${user?.name || req.params.id}` });
-  const restart = await syncXray(db);
+  const restart = await syncXray(db, true);
   await saveDb(db);
   res.json({ ok: true, restart });
 });
 
 app.post("/api/sync", requireAuth, async (_req, res) => {
   const db = await readDb();
-  const restart = await syncXray(db);
+  const restart = await syncXray(db, true);
   await saveDb(db);
   res.json({ ok: true, restart });
 });
@@ -450,7 +460,7 @@ app.get("*", (_req, res) => res.sendFile(path.join(dist, "index.html")));
 setInterval(async () => {
   try {
     const db = await readDb();
-    await syncXray(db);
+    await syncXray(db, false);
     await saveDb(db);
   } catch {
     // Keep the web process alive; manual sync/status will surface configuration problems.
