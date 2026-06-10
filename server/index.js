@@ -97,6 +97,23 @@ function isPublicIp(ip) {
   return true;
 }
 
+function extractOriginIp(line) {
+  const patterns = [
+    /\bfrom\s+(?:\[(?<ipv6>[A-Fa-f0-9:]+)\]|(?<ipv4>\d{1,3}(?:\.\d{1,3}){3})|(?<host>[^\s:]+))(?:[:\s]|$)/,
+    /\bsrc(?:addr|ip)?\s*[:=]\s*(?:\[(?<ipv6>[A-Fa-f0-9:]+)\]|(?<ipv4>\d{1,3}(?:\.\d{1,3}){3})|(?<host>[^\s:]+))(?:[:\s]|$)/i,
+    /\bclient\s*[:=]\s*(?:\[(?<ipv6>[A-Fa-f0-9:]+)\]|(?<ipv4>\d{1,3}(?:\.\d{1,3}){3})|(?<host>[^\s:]+))(?:[:\s]|$)/i,
+    /\bremote\s*[:=]\s*(?:\[(?<ipv6>[A-Fa-f0-9:]+)\]|(?<ipv4>\d{1,3}(?:\.\d{1,3}){3})|(?<host>[^\s:]+))(?:[:\s]|$)/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = line.match(pattern);
+    const ip = match?.groups?.ipv4 || match?.groups?.ipv6 || match?.groups?.host || "";
+    if (isPublicIp(ip)) return ip;
+  }
+
+  return "";
+}
+
 function extractStatEntries(stdout) {
   const entries = [];
   const patterns = [
@@ -235,14 +252,13 @@ async function readAccessLogSummary(users) {
 
   for (const line of text.split(/\r?\n/)) {
     if (!line) continue;
-    const ipMatches = line.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g) || [];
-    const ip = ipMatches.find(isPublicIp) || "";
     const timestamp = parseLogTimestamp(line);
 
     for (const descriptor of descriptors) {
       if (!descriptor.tokens.some((token) => line.includes(token))) continue;
 
       const entry = summary[descriptor.id];
+      const ip = extractOriginIp(line);
       if (ip) entry.allIps.add(ip);
       if (timestamp) {
         if (!entry.lastSeenAt || timestamp.getTime() > Date.parse(entry.lastSeenAt)) {
@@ -252,6 +268,7 @@ async function readAccessLogSummary(users) {
           entry.recentIps.add(ip);
         }
       }
+      break;
     }
   }
 
