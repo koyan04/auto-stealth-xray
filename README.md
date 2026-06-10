@@ -22,7 +22,7 @@ It is intentionally narrower than 3x-ui. The project focuses on ws+tls VLESS cli
 Clone the repository from GitHub, then run the installer from the project root:
 
 ```bash
-git clone https://github.com/<your-org>/xray-server-manager.git
+git clone https://github.com/koyan04/auto-stealth-xray.git
 cd xray-server-manager
 sudo bash scripts/install.sh vpn.yourdomain.com
 ```
