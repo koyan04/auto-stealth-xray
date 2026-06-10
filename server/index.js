@@ -89,6 +89,31 @@ function gbToBytes(gb) {
   return Math.round(gb * 1024 * 1024 * 1024);
 }
 
+function isPublicIp(ip) {
+  if (!ip) return false;
+  if (/^(?:127\.|0\.0\.0\.0|::1$|localhost$)/i.test(ip)) return false;
+  if (/^(?:10\.|192\.168\.|169\.254\.|172\.(?:1[6-9]|2\d|3[0-1])\.)/.test(ip)) return false;
+  if (/^(?:fc|fd)[0-9a-f]{2}:/i.test(ip)) return false;
+  return true;
+}
+
+function extractStatEntries(stdout) {
+  const entries = [];
+  const patterns = [
+    /name:\s*"?([^"\n]+?)"?\s+value:\s*(\d+)/g,
+    /"name"\s*:\s*"([^"]+)"\s*,\s*"value"\s*:\s*(\d+)/g,
+    /name=\s*"?([^"\n]+?)"?\s+value=\s*(\d+)/g
+  ];
+
+  for (const pattern of patterns) {
+    for (const match of stdout.matchAll(pattern)) {
+      entries.push({ name: match[1], value: Number(match[2]) });
+    }
+  }
+
+  return entries;
+}
+
 function parseLogTimestamp(line) {
   const matches = [
     line.match(/^(\d{4}[/-]\d{2}[/-]\d{2})[ T](\d{2}:\d{2}:\d{2})(?:[.,]\d+)?/),
@@ -210,7 +235,8 @@ async function readAccessLogSummary(users) {
 
   for (const line of text.split(/\r?\n/)) {
     if (!line) continue;
-    const ip = line.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/)?.[0] || "";
+    const ipMatches = line.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g) || [];
+    const ip = ipMatches.find(isPublicIp) || "";
     const timestamp = parseLogTimestamp(line);
 
     for (const descriptor of descriptors) {
@@ -235,12 +261,29 @@ async function readAccessLogSummary(users) {
 async function getUsage(users) {
   const usage = Object.fromEntries(users.map((user) => [user.id, { uplink: 0, downlink: 0, total: 0 }]));
   try {
-    const { stdout } = await execFileAsync(XRAY_BIN, ["api", "statsquery", `--server=${XRAY_API_SERVER}`, "-pattern", "user>>>"] , { timeout: 8000 });
-    const pattern = /name:\s*"user>>>(.*?)>>>traffic>>>(uplink|downlink)"\s*value:\s*(\d+)/g;
-    for (const match of stdout.matchAll(pattern)) {
+    const attempts = [
+      ["user>>>", "-pattern"],
+      ["user", "-pattern"],
+      ["", "-pattern"]
+    ];
+
+    let entries = [];
+    for (const [patternValue] of attempts) {
+      const { stdout } = await execFileAsync(
+        XRAY_BIN,
+        ["api", "statsquery", `--server=${XRAY_API_SERVER}`, "-pattern", patternValue],
+        { timeout: 8000 }
+      );
+      entries = extractStatEntries(stdout);
+      if (entries.length > 0) break;
+    }
+
+    for (const entry of entries) {
+      const match = entry.name.match(/^user>>>(.*?)>>>traffic>>>(uplink|downlink)$/);
+      if (!match) continue;
       const user = users.find((item) => userEmail(item) === match[1]);
       if (!user) continue;
-      usage[user.id][match[2]] += Number(match[3]);
+      usage[user.id][match[2]] += entry.value;
     }
   } catch {
     // Stats are unavailable until Xray has started with the API scaffold.
