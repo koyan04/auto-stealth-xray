@@ -67,7 +67,14 @@ async function api(path, options = {}) {
     }
   });
   if (response.status === 401) throw new Error("Unauthorized");
-  if (!response.ok) throw new Error((await response.json()).error || "Request failed");
+  if (!response.ok) {
+    const contentType = response.headers.get("Content-Type");
+    if (contentType && contentType.includes("application/json")) {
+      throw new Error((await response.json()).error || "Request failed");
+    } else {
+      throw new Error(await response.text() || "Request failed");
+    }
+  }
   return response.json();
 }
 
