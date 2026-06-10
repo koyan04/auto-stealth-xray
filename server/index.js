@@ -15,6 +15,8 @@ const PANEL_DB_PATH = process.env.PANEL_DB_PATH || "/etc/xray-panel/users.json";
 const XRAY_BIN = process.env.XRAY_BIN || "/usr/local/bin/xray";
 const XRAY_ACCESS_LOG = process.env.XRAY_ACCESS_LOG || "/var/log/xray/access.log";
 const XRAY_API_SERVER = process.env.XRAY_API_SERVER || "127.0.0.1:10085";
+const ONLINE_WINDOW_MS = Number(process.env.ONLINE_WINDOW_MS || 5 * 60 * 1000);
+const ACCESS_LOG_SAMPLE_BYTES = Number(process.env.XRAY_ACCESS_LOG_SAMPLE_BYTES || 4 * 1024 * 1024);
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -85,6 +87,24 @@ function isExpired(user) {
 
 function gbToBytes(gb) {
   return Math.round(gb * 1024 * 1024 * 1024);
+}
+
+function parseLogTimestamp(line) {
+  const matches = [
+    line.match(/^(\d{4}[/-]\d{2}[/-]\d{2})[ T](\d{2}:\d{2}:\d{2})(?:[.,]\d+)?/),
+    line.match(/^(\d{2}[/-]\d{2}[/-]\d{4})[ T](\d{2}:\d{2}:\d{2})(?:[.,]\d+)?/),
+    line.match(/\b(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:[.,]\d+)?\b/)
+  ];
+
+  for (const match of matches) {
+    if (!match) continue;
+    const datePart = match[1].replace(/\//g, "-");
+    const timePart = match[2];
+    const candidate = new Date(`${datePart}T${timePart}`);
+    if (!Number.isNaN(candidate.getTime())) return candidate;
+  }
+
+  return null;
 }
 
 async function readXrayConfig() {
@@ -158,29 +178,64 @@ async function restartXray() {
   }
 }
 
-async function syncXray(db) {
-  const usage = await getUsage(db.users);
-  const activeUsers = db.users.filter((user) => {
-    const used = usage[user.id]?.total || 0;
-    const ips = usage[user.id]?.ips || 0;
-    const overData = user.dataLimitGb > 0 && used >= gbToBytes(user.dataLimitGb);
-    const overIp = user.ipLimit > 0 && ips > user.ipLimit;
-    return user.enabled && !isExpired(user) && !overData && !overIp;
-  });
-  const config = ensureManagedConfig(await readXrayConfig(), activeUsers);
+async function readAccessLogSummary(users) {
+  const summary = Object.fromEntries(
+    users.map((user) => [
+      user.id,
+      {
+        allIps: new Set(),
+        recentIps: new Set(),
+        lastSeenAt: ""
+      }
+    ])
+  );
+
+  let text = "";
   try {
-    await fs.copyFile(XRAY_CONFIG_PATH, `${XRAY_CONFIG_PATH}.bak`);
+    const handle = await fs.open(XRAY_ACCESS_LOG, "r");
+    const stat = await handle.stat();
+    const size = Math.min(stat.size, ACCESS_LOG_SAMPLE_BYTES);
+    const buffer = Buffer.alloc(size);
+    await handle.read(buffer, 0, size, Math.max(0, stat.size - size));
+    await handle.close();
+    text = buffer.toString("utf8");
   } catch {
-    // First install may not have an existing config yet.
+    return summary;
   }
-  await writeJson(XRAY_CONFIG_PATH, config);
-  return restartXray();
+
+  const descriptors = users.map((user) => ({
+    id: user.id,
+    tokens: [userEmail(user), user.uuid].filter(Boolean)
+  }));
+
+  for (const line of text.split(/\r?\n/)) {
+    if (!line) continue;
+    const ip = line.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/)?.[0] || "";
+    const timestamp = parseLogTimestamp(line);
+
+    for (const descriptor of descriptors) {
+      if (!descriptor.tokens.some((token) => line.includes(token))) continue;
+
+      const entry = summary[descriptor.id];
+      if (ip) entry.allIps.add(ip);
+      if (timestamp) {
+        if (!entry.lastSeenAt || timestamp.getTime() > Date.parse(entry.lastSeenAt)) {
+          entry.lastSeenAt = timestamp.toISOString();
+        }
+        if (Date.now() - timestamp.getTime() <= ONLINE_WINDOW_MS && ip) {
+          entry.recentIps.add(ip);
+        }
+      }
+    }
+  }
+
+  return summary;
 }
 
 async function getUsage(users) {
-  const usage = Object.fromEntries(users.map((user) => [user.id, { uplink: 0, downlink: 0, total: 0, ips: 0 }]));
+  const usage = Object.fromEntries(users.map((user) => [user.id, { uplink: 0, downlink: 0, total: 0 }]));
   try {
-    const { stdout } = await execFileAsync(XRAY_BIN, ["api", "statsquery", `--server=${XRAY_API_SERVER}`, "-pattern", "user>>>"], { timeout: 8000 });
+    const { stdout } = await execFileAsync(XRAY_BIN, ["api", "statsquery", `--server=${XRAY_API_SERVER}`, "-pattern", "user>>>"] , { timeout: 8000 });
     const pattern = /name:\s*"user>>>(.*?)>>>traffic>>>(uplink|downlink)"\s*value:\s*(\d+)/g;
     for (const match of stdout.matchAll(pattern)) {
       const user = users.find((item) => userEmail(item) === match[1]);
@@ -191,7 +246,6 @@ async function getUsage(users) {
     // Stats are unavailable until Xray has started with the API scaffold.
   }
 
-  const ipCounts = await getIpCounts(users);
   for (const user of users) {
     const runtimeTotal = usage[user.id].uplink + usage[user.id].downlink;
     if (runtimeTotal < Number(user.lastRuntimeBytes || 0)) {
@@ -200,46 +254,23 @@ async function getUsage(users) {
     user.lastRuntimeBytes = runtimeTotal;
     user.usedBytes = Number(user.usageOffsetBytes || 0) + runtimeTotal;
     usage[user.id].total = user.usedBytes;
-    usage[user.id].ips = ipCounts[user.id] || 0;
   }
+
   return usage;
-}
-
-async function getIpCounts(users) {
-  const counts = Object.fromEntries(users.map((user) => [user.id, new Set()]));
-  let text = "";
-  try {
-    const handle = await fs.open(XRAY_ACCESS_LOG, "r");
-    const stat = await handle.stat();
-    const size = Math.min(stat.size, 1024 * 1024 * 4);
-    const buffer = Buffer.alloc(size);
-    await handle.read(buffer, 0, size, Math.max(0, stat.size - size));
-    await handle.close();
-    text = buffer.toString("utf8");
-  } catch {
-    return Object.fromEntries(Object.keys(counts).map((id) => [id, 0]));
-  }
-
-  for (const user of users) {
-    const email = userEmail(user).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const linePattern = new RegExp(`^.*${email}.*$`, "gim");
-    for (const lineMatch of text.matchAll(linePattern)) {
-      const ip = lineMatch[0].match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/)?.[0];
-      if (ip) counts[user.id].add(ip);
-    }
-  }
-
-  return Object.fromEntries(Object.entries(counts).map(([id, set]) => [id, set.size]));
 }
 
 async function serializeUsers() {
   const db = await readDb();
-  const usage = await getUsage(db.users);
+  const [usage, activity] = await Promise.all([getUsage(db.users), readAccessLogSummary(db.users)]);
   await saveDb(db);
+
   return db.users.map((user) => {
-    const used = usage[user.id] || { total: 0, ips: 0 };
+    const used = usage[user.id] || { total: 0 };
+    const live = activity[user.id] || { allIps: new Set(), recentIps: new Set(), lastSeenAt: "" };
     const overData = user.dataLimitGb > 0 && used.total >= gbToBytes(user.dataLimitGb);
-    const overIp = user.ipLimit > 0 && used.ips > user.ipLimit;
+    const overIp = user.ipLimit > 0 && live.recentIps.size > user.ipLimit;
+    const online = user.enabled && !isExpired(user) && !overData && !overIp && live.recentIps.size > 0;
+
     return {
       ...user,
       email: userEmail(user),
@@ -247,7 +278,11 @@ async function serializeUsers() {
       expired: isExpired(user),
       overData,
       overIp,
-      onlineIps: used.ips,
+      online,
+      onlineDevices: live.recentIps.size,
+      connectedIps: Array.from(live.recentIps).sort(),
+      knownIps: Array.from(live.allIps).sort(),
+      lastSeenAt: live.lastSeenAt,
       usedBytes: used.total,
       activeInXray: user.enabled && !isExpired(user) && !overData && !overIp
     };
@@ -266,6 +301,27 @@ function buildVlessLink(user) {
     alpn: "http/1.1"
   });
   return `vless://${user.uuid}@${DOMAIN}:443?${params.toString()}#${encodeURIComponent(user.name)}`;
+}
+
+async function syncXray(db) {
+  const usage = await getUsage(db.users);
+  const activity = await readAccessLogSummary(db.users);
+  const activeUsers = db.users.filter((user) => {
+    const used = usage[user.id]?.total || 0;
+    const live = activity[user.id] || { recentIps: new Set() };
+    const overData = user.dataLimitGb > 0 && used >= gbToBytes(user.dataLimitGb);
+    const overIp = user.ipLimit > 0 && live.recentIps.size > user.ipLimit;
+    return user.enabled && !isExpired(user) && !overData && !overIp;
+  });
+
+  const config = ensureManagedConfig(await readXrayConfig(), activeUsers);
+  try {
+    await fs.copyFile(XRAY_CONFIG_PATH, `${XRAY_CONFIG_PATH}.bak`);
+  } catch {
+    // First install may not have an existing config yet.
+  }
+  await writeJson(XRAY_CONFIG_PATH, config);
+  return restartXray();
 }
 
 app.get("/api/session", requireAuth, async (_req, res) => {
@@ -322,7 +378,9 @@ app.get("/api/status", requireAuth, async (_req, res) => {
     wsPath: WS_PATH,
     xrayConfigPath: XRAY_CONFIG_PATH,
     totalUsers: db.users.length,
-    activeUsers: users.filter((user) => user.activeInXray).length,
+    onlineUsers: users.filter((user) => user.online).length,
+    unlimitedUsers: users.filter((user) => user.dataLimitGb === 0 && user.ipLimit === 0).length,
+    disabledUsers: users.filter((user) => !user.enabled).length,
     limitedUsers: users.filter((user) => user.expired || user.overData || user.overIp).length
   });
 });

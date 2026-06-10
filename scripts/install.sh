@@ -1,17 +1,17 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "${EUID}" -ne 0 ]]; then
+if [ "${EUID}" -ne 0 ]; then
   echo "Run as root: sudo bash scripts/install.sh your.domain.com"
   exit 1
 fi
 
 DOMAIN="${1:-}"
-if [[ -z "${DOMAIN}" ]]; then
+if [ -z "${DOMAIN}" ]; then
   read -rp "Domain name, for example vpn.yourdomain.com: " DOMAIN
 fi
 
-if [[ -z "${DOMAIN}" ]]; then
+if [ -z "${DOMAIN}" ]; then
   echo "Domain is required."
   exit 1
 fi
@@ -19,13 +19,16 @@ fi
 APP_DIR="${APP_DIR:-/opt/xray-server-manager}"
 PANEL_PORT="${PANEL_PORT:-2053}"
 WS_PATH="${WS_PATH:-/assets}"
-PANEL_TOKEN="${PANEL_TOKEN:-$(tr -d '-' </proc/sys/kernel/random/uuid)}"
-FIRST_UUID="$(tr -d '-' </proc/sys/kernel/random/uuid)"
+if [ -z "${PANEL_TOKEN:-}" ]; then
+  PANEL_TOKEN=$(tr -d '-' </proc/sys/kernel/random/uuid)
+fi
+FIRST_UUID=$(tr -d '-' </proc/sys/kernel/random/uuid)
 
 echo "[1] Install base packages"
 apt update -y
 apt install -y ca-certificates curl nginx certbot fail2ban rsync
-if ! command -v node >/dev/null || [[ "$(node -p 'Number(process.versions.node.split(`.`)[0])')" -lt 18 ]]; then
+NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]')
+if ! command -v node >/dev/null || [ "$NODE_MAJOR" -lt 18 ]; then
   curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
   apt install -y nodejs
 fi
@@ -170,10 +173,11 @@ systemctl restart xray
 
 echo "[9] Install web panel"
 mkdir -p "${APP_DIR}"
-rsync -a --delete --exclude node_modules --exclude .git ./ "${APP_DIR}/"
+rsync -a --delete --exclude node_modules --exclude .git --exclude .env ./ "${APP_DIR}/"
 cd "${APP_DIR}"
 npm install
 VITE_BASE_PATH=/panel/ npm run build
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 cat >"${APP_DIR}/.env" <<EOF
 DOMAIN=${DOMAIN}
 PANEL_PORT=${PANEL_PORT}
@@ -196,8 +200,8 @@ cat >/etc/xray-panel/users.json <<EOF
       "ipLimit": 0,
       "expiresAt": "",
       "note": "Created during installation",
-      "createdAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
-      "updatedAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+      "createdAt": "${NOW}",
+      "updatedAt": "${NOW}"
     }
   ],
   "events": []
@@ -207,7 +211,8 @@ EOF
 cat >/etc/systemd/system/xray-manager.service <<EOF
 [Unit]
 Description=Xray Server Manager
-After=network.target xray.service
+Wants=network-online.target xray.service nginx.service fail2ban.service
+After=network-online.target xray.service nginx.service fail2ban.service
 
 [Service]
 Type=simple
@@ -221,7 +226,8 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
-systemctl enable --now xray-manager
+systemctl enable xray nginx fail2ban xray-manager
+systemctl enable --now xray nginx fail2ban xray-manager
 
 echo "[10] Configure nginx TLS, ws inbound, and panel proxy"
 cat >/etc/nginx/sites-enabled/default <<EOF
@@ -278,14 +284,4 @@ EOF
 systemctl enable --now fail2ban
 systemctl restart fail2ban
 
-echo ""
-echo "=========================================================="
-echo " Xray Server Manager installed"
-echo "=========================================================="
-echo "Panel: https://${DOMAIN}/panel/"
-echo "Panel token: ${PANEL_TOKEN}"
-echo "Domain: ${DOMAIN}"
-echo "UUID: ${FIRST_UUID}"
-echo "VLESS link:"
-echo "vless://${FIRST_UUID}@${DOMAIN}:443?type=ws&encryption=none&security=tls&path=%2Fassets&host=${DOMAIN}&sni=${DOMAIN}&fp=chrome&alpn=http%2F1.1#${DOMAIN}"
-echo "=========================================================="
+VLESS_LINK="vless://${FIRST_UUID}@${DOMAIN}:443?type=ws&encryption=none&security=tls&path=%2Fassets&host=${DOMAIN}&sni=${DOMAIN}&fp=chrome&alpn=http%2F1.1#${DOMAIN}"

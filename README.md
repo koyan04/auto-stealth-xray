@@ -50,6 +50,18 @@ The installation entry point is [scripts/install.sh](scripts/install.sh). It per
 - builds the web panel
 - creates the systemd service
 
+## Update script
+
+The update entry point is [scripts/update.sh](scripts/update.sh). Run it from the cloned repository after pulling the latest changes:
+
+```bash
+cd ~/auto-stealth-xray
+git pull
+sudo bash scripts/update.sh xray.vchannel.dpdns.org
+```
+
+The update flow refreshes the app files, rebuilds the panel, and restarts the necessary services without overwriting `/etc/xray-panel/users.json`, the Xray config, or other server data.
+
 ## After installation
 
 Open the panel at:
